@@ -1,0 +1,19 @@
+# Node modules — we install them inside the container
+node_modules/
+
+# Build outputs
+build/
+dist/
+
+# Logs
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+
+# Git
+.git
+.gitignore
+
+# Editor / system files
+.vscode/
+.DS_Store
