@@ -1,8 +1,11 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as ImageManipulator from "expo-image-manipulator";
+import * as ImagePicker from "expo-image-picker";
 import React, { useState } from "react";
 import {
   ActivityIndicator,
   Button,
+  Image,
   Modal,
   Platform,
   StyleSheet,
@@ -15,58 +18,138 @@ const urls =
   Platform.OS === "android"
     ? "https://semivolatile-nancey-incongrously.ngrok-free.dev"
     : "http://localhost:8000";
+
 const BACKEND_URL = urls + "/api/";
+
+// ✅ LOCKED ENUM (no more garbage data)
+const ACTIVITY_TYPES = [
+  "PLANTING",
+  "SPRAYING",
+  "HARVEST",
+  "FERTILIZING",
+  "OTHER",
+];
 
 type Props = {
   farmId: string;
   visible: boolean;
   onClose: () => void;
-  onAdded: (activityType: string, description: string) => void;
+  // onAdded: (activityType: string, description: string, image?: any) => void;
 };
 
 export default function FarmActivityModal({
   farmId,
   visible,
   onClose,
-  onAdded,
+  // onAdded,
 }: Props) {
-  const [activityType, setActivityType] = useState("");
+  const [activityType, setActivityType] = useState("PLANTING");
   const [description, setDescription] = useState("");
+  const [image, setImage] = useState<any>(null);
+
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
 
+  // 📸 PICK + COMPRESS IMAGE
+  const pickImage = async () => {
+    if (Platform.OS === "web") {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "image/*";
+
+      input.onchange = async (e: any) => {
+        const file = e.target.files[0];
+        if (file) {
+          setImage({ file, preview: URL.createObjectURL(file) });
+        }
+      };
+
+      input.click();
+    } else {
+      const permission =
+        await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+      if (!permission.granted) {
+        setMessage("Permission required to access images");
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        quality: 1,
+      });
+
+      if (!result.canceled) {
+        const asset = result.assets[0];
+
+        // 🔥 COMPRESS IMAGE
+        const compressed = await ImageManipulator.manipulateAsync(
+          asset.uri,
+          [{ resize: { width: 1000 } }],
+          { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG },
+        );
+
+        setImage(compressed);
+      }
+    }
+  };
+
+  // 📦 FORM DATA
+  const createFormData = () => {
+    const data = new FormData();
+
+    data.append("activity_type", activityType);
+    data.append("description", description);
+
+    if (image) {
+      if (Platform.OS === "web") {
+        data.append("image", image.file);
+      } else {
+        data.append("image", {
+          uri: image.uri,
+          name: "activity.jpg",
+          type: "image/jpeg",
+        } as any);
+      }
+    }
+
+    return data;
+  };
+
+  // 🚀 SUBMIT
   const handleSubmit = async () => {
-    if (!activityType) return setMessage("Activity type required");
     setLoading(true);
     setMessage("");
 
     const token = await AsyncStorage.getItem("accessToken");
+
     try {
-      console.log("using url", BACKEND_URL);
-      console.log("Submitting activity", { farmId, activityType, description });
       const res = await fetch(`${BACKEND_URL}farms/${farmId}/add_activity/`, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ activity_type: activityType, description }),
+        body: createFormData(),
       });
-      console.log("Response status", res.status);
 
       if (!res.ok) {
         const err = await res.text();
         setMessage(err);
       } else {
-        onAdded(activityType, description); // pass data back
-        setActivityType("");
+        // onAdded(activityType, description, image);
+
+        // reset
         setDescription("");
+        setImage(null);
+        setActivityType("PLANTING");
+
         onClose();
       }
     } catch (e) {
       setMessage("Network error");
       console.error(e);
     }
+
     setLoading(false);
   };
 
@@ -75,13 +158,26 @@ export default function FarmActivityModal({
       <View style={styles.overlay}>
         <View style={styles.container}>
           <Text style={styles.title}>Add Farm Activity</Text>
+
           {message ? <Text style={styles.message}>{message}</Text> : null}
-          <TextInput
-            style={styles.input}
-            placeholder="Activity Type (e.g., Planting)"
-            value={activityType}
-            onChangeText={setActivityType}
-          />
+
+          {/* ✅ ENUM SELECTOR */}
+          <Text style={styles.label}>Activity Type</Text>
+          <View style={styles.typeContainer}>
+            {ACTIVITY_TYPES.map((type) => (
+              <Text
+                key={type}
+                style={[
+                  styles.typeButton,
+                  activityType === type && styles.activeType,
+                ]}
+                onPress={() => setActivityType(type)}
+              >
+                {type}
+              </Text>
+            ))}
+          </View>
+
           <TextInput
             style={[styles.input, { height: 80 }]}
             placeholder="Description (optional)"
@@ -89,6 +185,19 @@ export default function FarmActivityModal({
             onChangeText={setDescription}
             multiline
           />
+
+          {/* 📸 IMAGE */}
+          <Button title="Pick Image" onPress={pickImage} />
+
+          {image && (
+            <Image
+              source={{
+                uri: Platform.OS === "web" ? image.preview : image.uri,
+              }}
+              style={styles.preview}
+            />
+          )}
+
           {loading ? (
             <ActivityIndicator />
           ) : (
@@ -114,13 +223,42 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(0,0,0,0.5)",
     padding: 20,
   },
+
   container: {
     backgroundColor: "#fff",
     borderRadius: 16,
     padding: 20,
   },
+
   title: { fontSize: 20, fontWeight: "700", marginBottom: 15 },
   message: { color: "red", marginBottom: 10 },
+
+  label: {
+    fontWeight: "600",
+    marginBottom: 5,
+  },
+
+  typeContainer: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    marginBottom: 10,
+  },
+
+  typeButton: {
+    padding: 8,
+    borderWidth: 1,
+    borderColor: "#ccc",
+    borderRadius: 20,
+    marginRight: 6,
+    marginBottom: 6,
+  },
+
+  activeType: {
+    backgroundColor: "#4CAF50",
+    color: "#fff",
+    borderColor: "#4CAF50",
+  },
+
   input: {
     borderWidth: 1,
     borderColor: "#ccc",
@@ -128,5 +266,17 @@ const styles = StyleSheet.create({
     padding: 10,
     marginBottom: 10,
   },
-  buttons: { flexDirection: "row", justifyContent: "space-between" },
+
+  preview: {
+    width: "100%",
+    height: 150,
+    marginTop: 10,
+    borderRadius: 8,
+  },
+
+  buttons: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 15,
+  },
 });

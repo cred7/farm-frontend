@@ -1,12 +1,14 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import NetInfo from "@react-native-community/netinfo";
 import * as ImagePicker from "expo-image-picker";
+import * as Location from "expo-location";
 import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Button,
   Dimensions,
-  Image,
   Platform,
+  Image as RNImage,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -14,30 +16,40 @@ import {
   Text,
   View,
 } from "react-native";
+import { v4 as uuidv4 } from "uuid";
 
 import MapScreen from "../components/Map";
 
 type UploadResponse = { lat: number; lng: number };
+
 type UploadResponseArea = {
   area_m2: string;
   hectares: string;
   acres: string;
-  coord: [number, number][];
+  coord: { id?: string; lat: number; lng: number }[];
 };
+
 type QueueItem = {
+  id: string;
   uri?: string;
-  base64?: string;
   name: string;
   type: string;
   farm_id: string;
   is_boundary: boolean;
+  lat: number;
+  lng: number;
+  status: "pending" | "syncing" | "failed" | "synced";
+  retries: number;
+  createdAt: number;
 };
 
 const urls =
   Platform.OS === "android"
     ? "https://semivolatile-nancey-incongrously.ngrok-free.dev"
     : "http://localhost:8000";
+
 const BACKEND_URL = urls + "/api/";
+
 export default function FarmCapture() {
   const [image, setImage] = useState<string | null>(null);
   const [farmId, setFarmId] = useState("");
@@ -49,15 +61,28 @@ export default function FarmCapture() {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [isBoundary, setIsBoundary] = useState(true);
+  const [isConnected, setIsConnected] = useState(true);
+
+  const SCREEN_WIDTH = Dimensions.get("window").width;
+  const isWideScreen = SCREEN_WIDTH > 900;
 
   useEffect(() => {
     loadQueue();
     loadSelectedFarm();
+
+    const unsubscribe = NetInfo.addEventListener((state) => {
+      const connected = !!state.isConnected;
+      setIsConnected(connected);
+      if (connected) syncQueue();
+    });
+
+    return () => unsubscribe();
   }, []);
 
   const loadSelectedFarm = async () => {
     const id = await AsyncStorage.getItem("selectedFarmId");
     if (id) setFarmId(id);
+    if (id) getArea(id);
   };
 
   const loadQueue = async () => {
@@ -70,6 +95,175 @@ export default function FarmCapture() {
     await AsyncStorage.setItem("uploadQueue", JSON.stringify(newQueue));
   };
 
+  const saveOffline = async (file: QueueItem) => {
+    await saveQueue([...queue, file]);
+  };
+
+  const uploadSingle = async (file: QueueItem) => {
+    try {
+      const formData = new FormData();
+
+      if (file.uri) {
+        if (Platform.OS === "web") formData.append("image", file.uri);
+        else
+          formData.append("image", {
+            uri: file.uri,
+            name: file.name,
+            type: file.type,
+          } as any);
+      }
+
+      formData.append("farm_id", file.farm_id);
+      formData.append("is_boundary", file.is_boundary ? "True" : "False");
+      formData.append("lat", file.lat.toString());
+      formData.append("lng", file.lng.toString());
+
+      const token = await AsyncStorage.getItem("accessToken");
+      const res = await fetch(BACKEND_URL + "farm-points/upload_image/", {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        body: formData,
+      });
+
+      if (!res.ok) return false;
+
+      const data: UploadResponse = await res.json();
+      setResponse(data);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const handleUpload = async (file: QueueItem) => {
+    if (!isConnected) {
+      await saveOffline(file);
+      setMessage("📴 Offline - saved to queue");
+      return;
+    }
+
+    setLoading(true);
+    setMessage("");
+
+    try {
+      const token = await AsyncStorage.getItem("accessToken");
+
+      const formData = new FormData();
+      if (file.uri) {
+        formData.append("image", {
+          uri: file.uri,
+          name: file.name,
+          type: file.type,
+        } as any);
+      }
+      formData.append("farm_id", file.farm_id);
+      formData.append("is_boundary", file.is_boundary ? "True" : "False");
+      formData.append("lat", file.lat.toString());
+      formData.append("lng", file.lng.toString());
+
+      const res = await fetch(BACKEND_URL + "farm-points/upload_image/", {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        body: formData,
+      });
+
+      if (!res.ok) {
+        await saveOffline(file);
+        setMessage("📴 Failed - saved to queue");
+      } else {
+        const data: UploadResponse = await res.json();
+        setResponse(data);
+        setMessage("✅ Uploaded successfully");
+      }
+    } catch {
+      await saveOffline(file);
+      setMessage("📴 Failed - saved to queue");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const syncQueue = async () => {
+    if (!queue.length) return;
+    setLoading(true);
+
+    let updatedQueue = [...queue];
+    for (let i = 0; i < updatedQueue.length; i++) {
+      let item = updatedQueue[i];
+      if (item.status === "synced") continue;
+      item.status = "syncing";
+      await saveQueue([...updatedQueue]);
+      const success = await uploadSingle(item);
+      item.status = success ? "synced" : "failed";
+      item.retries += success ? 0 : 1;
+      updatedQueue[i] = item;
+      await saveQueue([...updatedQueue]);
+    }
+
+    await cleanQueue();
+    setLoading(false);
+    setMessage("🔄 Sync complete");
+    getArea();
+  };
+
+  const cleanQueue = async () => {
+    const now = Date.now();
+    const filtered = queue.filter(
+      (item) =>
+        item.status !== "synced" || now - item.createdAt < 24 * 60 * 60 * 1000,
+    );
+    await saveQueue(filtered);
+  };
+
+  // 🔥 Updated pickImage with cross-platform GPS extraction
+
+  const extractGPS = async (asset: any) => {
+    if (Platform.OS !== "web") {
+      const exif = asset.exif;
+      if (!exif?.GPSLatitude || !exif?.GPSLongitude) return null;
+
+      const toDecimal = (coord: number, ref: string) => {
+        let dec = coord;
+        if (ref === "S" || ref === "W") dec *= -1;
+        return dec;
+      };
+
+      return {
+        lat: toDecimal(exif.GPSLatitude, exif.GPSLatitudeRef),
+        lng: toDecimal(exif.GPSLongitude, exif.GPSLongitudeRef),
+      };
+    } else {
+      // Web only
+      const EXIF = await import("exif-js");
+      return new Promise<{ lat: number; lng: number } | null>((resolve) => {
+        const img = new Image();
+        img.src = asset;
+        img.onload = () => {
+          const EXIF = require("exif-js");
+          EXIF.getData(img as any, function () {
+            const lat = EXIF.getTag(this, "GPSLatitude");
+            const lng = EXIF.getTag(this, "GPSLongitude");
+            const latRef = EXIF.getTag(this, "GPSLatitudeRef");
+            const lngRef = EXIF.getTag(this, "GPSLongitudeRef");
+
+            if (!lat || !lng) return resolve(null);
+
+            const toDecimal = (coord: number[], ref: string) => {
+              let dec = coord[0] + coord[1] / 60 + coord[2] / 3600;
+              if (ref === "S" || ref === "W") dec *= -1;
+              return dec;
+            };
+
+            resolve({
+              lat: toDecimal(lat, latRef),
+              lng: toDecimal(lng, lngRef),
+            });
+          });
+        };
+      });
+    }
+  };
+
   const pickImage = async () => {
     if (!farmId) return setMessage("No farm selected");
 
@@ -77,136 +271,89 @@ export default function FarmCapture() {
       const input = document.createElement("input");
       input.type = "file";
       input.accept = "image/*";
+
       input.onchange = async (e: any) => {
         const file = e.target.files[0];
-        setImage(URL.createObjectURL(file));
-        await handleUpload(file);
+        const url = URL.createObjectURL(file);
+        setImage(url);
+
+        const gps = await extractGPS(url);
+        if (!gps) return setMessage("❌ No GPS data found");
+
+        const fileItem: QueueItem = {
+          id: uuidv4(),
+          uri: url,
+          name: file.name,
+          type: file.type,
+          farm_id: farmId,
+          is_boundary: isBoundary,
+          lat: gps.lat,
+          lng: gps.lng,
+          status: "pending",
+          retries: 0,
+          createdAt: Date.now(),
+        };
+
+        await handleUpload(fileItem);
       };
+
       input.click();
     } else {
+      await Location.requestForegroundPermissionsAsync();
+
       const result = await ImagePicker.launchCameraAsync({
         quality: 1,
         exif: true,
       });
+
       if (!result.canceled) {
         const img = result.assets[0];
         setImage(img.uri);
-        await handleUpload({
+
+        const gps = await extractGPS(img);
+        if (!gps) return setMessage("❌ No GPS data found");
+
+        const fileItem: QueueItem = {
+          id: uuidv4(),
           uri: img.uri,
           name: "photo.jpg",
           type: "image/jpeg",
-        });
+          farm_id: farmId,
+          is_boundary: isBoundary,
+          lat: gps.lat,
+          lng: gps.lng,
+          status: "pending",
+          retries: 0,
+          createdAt: Date.now(),
+        };
+
+        await handleUpload(fileItem);
       }
     }
   };
 
-  const saveOffline = async (file: any) => {
-    const item: QueueItem = {
-      uri: file.uri,
-      name: file.name,
-      type: file.type,
-      farm_id: farmId,
-      is_boundary: isBoundary,
-    };
-    await saveQueue([...queue, item]);
-  };
-
-  const handleUpload = async (file: any) => {
-    setLoading(true);
-    setMessage("");
-    const formData = new FormData();
-    if (Platform.OS === "web") formData.append("image", file);
-    else
-      formData.append("image", {
-        uri: file.uri,
-        name: "photo.jpg",
-        type: "image/jpeg",
-      } as any);
-    formData.append("farm_id", farmId);
-    formData.append("is_boundary", isBoundary ? "true" : "false");
-
-    let attempts = 0;
-    const maxRetries = 3;
-    while (attempts < maxRetries) {
-      try {
-        const token = await AsyncStorage.getItem("accessToken");
-
-        const res = await fetch(BACKEND_URL + "farm-points/upload_image/", {
-          method: "POST",
-          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-          body: formData,
-        });
-        if (!res.ok) {
-          const err = await res.text();
-          setMessage(`❌ ${err}`);
-          setLoading(false);
-          return;
-        }
-        const data: UploadResponse = await res.json();
-        setResponse(data);
-        setMessage("✅ Uploaded successfully");
-        setLoading(false);
-        return;
-      } catch {
-        attempts++;
-        if (attempts >= maxRetries) {
-          await saveOffline(file);
-          setMessage("📴 Network error. Saved offline.");
-          setLoading(false);
-          return;
-        }
-      }
-    }
-  };
-
-  const syncQueue = async () => {
-    if (!queue.length) return setMessage("No pending uploads");
-    setLoading(true);
-    const remaining: QueueItem[] = [];
-    for (const item of queue) {
-      const formData = new FormData();
-      try {
-        if (Platform.OS === "web" && item.base64) {
-          const blob = await (await fetch(item.base64)).blob();
-          formData.append(
-            "image",
-            new File([blob], item.name, { type: item.type }),
-          );
-        } else if (item.uri)
-          formData.append("image", {
-            uri: item.uri,
-            name: item.name,
-            type: item.type,
-          } as any);
-        formData.append("farm_id", item.farm_id);
-        formData.append("is_boundary", item.is_boundary ? "true" : "false");
-        const token = await AsyncStorage.getItem("accessToken");
-        const res = await fetch(BACKEND_URL + "farm-points/upload_image/", {
-          method: "POST",
-          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-          body: formData,
-        });
-        if (!res.ok) remaining.push(item);
-      } catch {
-        remaining.push(item);
-      }
-    }
-    await saveQueue(remaining);
-    setLoading(false);
-    setMessage("🔄 Sync complete");
-  };
-
-  const getArea = async () => {
+  const getArea = async (farmIdParam?: string) => {
     setResponseArea(null);
     setMessage("");
     try {
+      const id = farmIdParam || farmId;
+      if (!id) return;
       const token = await AsyncStorage.getItem("accessToken");
-      const res = await fetch(BACKEND_URL + `farms/${farmId}/area/`, {
+
+      const res = await fetch(BACKEND_URL + `farms/${id}/area/`, {
         headers: token ? { Authorization: `Bearer ${token}` } : undefined,
       });
+
       if (res.ok) {
         const data: UploadResponseArea = await res.json();
-        setResponseArea(data);
+        setResponseArea({
+          ...data,
+          coord: data.coord.map((p: any) => ({
+            id: p.id,
+            lat: p.lat,
+            lng: p.lng,
+          })),
+        });
       } else {
         const err = await res.text();
         setMessage(err);
@@ -219,9 +366,20 @@ export default function FarmCapture() {
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.scrollContainer}>
-        <View style={styles.container}>
-          <View style={styles.card}>
+        <View
+          style={[
+            styles.container,
+            { flexDirection: isWideScreen ? "row" : "column" },
+          ]}
+        >
+          <View
+            style={[styles.card, { maxWidth: isWideScreen ? "50%" : "90%" }]}
+          >
             <Text style={styles.title}>🌱 Farm Capture</Text>
+            <Text style={{ textAlign: "center", marginBottom: 5 }}>
+              {isConnected ? "🟢 Online" : "🔴 Offline"}
+            </Text>
+
             {message && <Text style={styles.message}>{message}</Text>}
 
             <View
@@ -254,22 +412,27 @@ export default function FarmCapture() {
             </View>
 
             {loading && (
-              <ActivityIndicator
-                style={{ marginTop: 15 }}
-                size="large"
-                color="#FFD700"
-              />
+              <ActivityIndicator style={{ marginTop: 15 }} size="large" />
             )}
-            {image && <Image source={{ uri: image }} style={styles.image} />}
+
+            {image && <RNImage source={{ uri: image }} style={styles.image} />}
             {response && (
               <Text style={styles.result}>
                 Lat: {response.lat} {"\n"}Lng: {response.lng}
               </Text>
             )}
-            <Text style={styles.queue}>Pending uploads: {queue.length}</Text>
+
+            <Text style={styles.queue}>
+              📦 Pending Sync:{" "}
+              {queue.filter((q) => q.status !== "synced").length}
+            </Text>
 
             <View style={{ marginTop: 15 }}>
-              <Button title="📐 Find Area" onPress={getArea} color="#FF5722" />
+              <Button
+                title="📐 Find Area"
+                onPress={() => getArea()}
+                color="#FF5722"
+              />
               {responseArea && (
                 <>
                   <Text style={styles.areaText}>
@@ -289,11 +452,13 @@ export default function FarmCapture() {
           {responseArea && (
             <View style={styles.mapCard}>
               <MapScreen
+                farmId={farmId}
                 initialCoords={responseArea.coord.map((p) => ({
-                  latitude: p[0],
-                  longitude: p[1],
+                  id: p.id,
+                  latitude: p.lat,
+                  longitude: p.lng,
                 }))}
-                refreshArea={getArea}
+                refreshArea={() => getArea()}
               />
             </View>
           )}
@@ -303,60 +468,46 @@ export default function FarmCapture() {
   );
 }
 
-const { width: SCREEN_WIDTH } = Dimensions.get("window");
-
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: "#F3F6F9" },
-  scrollContainer: {
-    flexGrow: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 20,
-  },
+  scrollContainer: { flexGrow: 1, alignItems: "center", paddingVertical: 20 },
   container: {
-    flexDirection: Platform.OS === "web" ? "row" : "column",
-    justifyContent: "center",
-    alignItems: "center",
-    gap: 20,
     width: "100%",
+    maxWidth: 1200,
+    justifyContent: "center",
+    gap: 20,
   },
   card: {
-    width: Platform.OS === "web" ? "40%" : "90%",
-    maxWidth: 480,
+    flex: 1,
+    minWidth: 320,
+    maxWidth: 500,
     padding: 20,
     backgroundColor: "#FFFFFF",
     borderRadius: 16,
     shadowColor: "#000",
-    shadowOpacity: 0.1,
-    shadowRadius: 10,
-    elevation: 5,
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 4,
   },
   mapCard: {
-    width: Platform.OS === "web" ? "40%" : "90%",
-    height: 400,
-    maxWidth: 480,
+    flex: 1,
+    minWidth: 320,
+    maxWidth: 600,
+    height: 420,
     borderRadius: 16,
     overflow: "hidden",
-    backgroundColor: "#FFFFFF",
-    shadowColor: "#000",
-    shadowOpacity: 0.1,
-    shadowRadius: 10,
-    elevation: 5,
+    backgroundColor: "#fff",
+    elevation: 4,
   },
   title: {
-    fontSize: 24,
+    fontSize: 22,
     fontWeight: "700",
-    color: "#1F2937",
-    marginBottom: 15,
-    textAlign: "center",
-  },
-  message: {
-    textAlign: "center",
-    color: "#EF4444",
-    fontWeight: "600",
     marginBottom: 10,
+    textAlign: "center",
   },
-  image: { width: "100%", height: 220, marginTop: 15, borderRadius: 12 },
+  message: { textAlign: "center", color: "#EF4444", marginBottom: 10 },
+  image: { width: "100%", height: 200, marginTop: 10, borderRadius: 12 },
+  areaText: { marginTop: 5, textAlign: "center", fontWeight: "600" },
   result: {
     marginTop: 12,
     textAlign: "center",
@@ -364,10 +515,4 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   queue: { marginTop: 10, textAlign: "center", color: "#6B7280" },
-  areaText: {
-    marginTop: 5,
-    textAlign: "center",
-    fontWeight: "600",
-    color: "#111827",
-  },
 });

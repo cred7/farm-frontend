@@ -1,8 +1,14 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { useState } from "react";
-import { MapContainer, Marker, Polygon, TileLayer } from "react-leaflet";
+import { useRef, useState } from "react";
+import {
+  MapContainer,
+  Marker,
+  Polygon,
+  TileLayer,
+  useMapEvents,
+} from "react-leaflet";
 import { Platform } from "react-native";
 
 delete (L.Icon.Default.prototype as any)._getIconUrl;
@@ -14,28 +20,62 @@ L.Icon.Default.mergeOptions({
   shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
 });
 
-type Coord = { latitude: number; longitude: number };
+type Coord = { id?: string; latitude: number; longitude: number };
 type MapScreenProps = {
   initialCoords: Coord[];
-  farmId?: string; // optional, if you want to pass explicitly
+  farmId?: string;
   refreshArea?: () => void;
 };
 
 export default function MapScreen({
   initialCoords,
+  farmId,
   refreshArea,
 }: MapScreenProps) {
-  const [coords, setCoords] = useState(initialCoords || []);
+  const [coords, setCoords] = useState<Coord[]>(initialCoords || []);
+  const [drawing, setDrawing] = useState(true);
+  const [mapType, setMapType] = useState<"standard" | "satellite" | "hybrid">(
+    "standard",
+  );
+  const mapRef = useRef<any>(null);
 
   const urls =
     Platform.OS === "android"
       ? "https://semivolatile-nancey-incongrously.ngrok-free.dev"
       : "http://localhost:8000";
   const BACKEND_URL = urls + "/api/";
-  const updatePoint = async (index: number, lat: number, lng: number) => {
+
+  // --- Backend calls ---
+  const createPoint = async (lat: number, lng: number) => {
     try {
       const token = await AsyncStorage.getItem("accessToken");
-      await fetch(`${BACKEND_URL}farm-points/${index}/`, {
+      const res = await fetch(`${BACKEND_URL}farm-points/upload_image/`, {
+        method: "POST",
+        headers: {
+          Authorization: token ? `Bearer ${token}` : "",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          farm_id: farmId,
+          is_boundary: true,
+          lat,
+          lng,
+        }),
+      });
+
+      if (!res.ok) throw new Error("Failed to create point");
+      const data = await res.json();
+      return data; // {id, lat, lng}
+    } catch (err) {
+      console.error(err);
+      return null;
+    }
+  };
+
+  const updatePoint = async (id: string, lat: number, lng: number) => {
+    try {
+      const token = await AsyncStorage.getItem("accessToken");
+      await fetch(`${BACKEND_URL}farm-points/${id}/`, {
         method: "PATCH",
         headers: {
           Authorization: token ? `Bearer ${token}` : "",
@@ -44,40 +84,103 @@ export default function MapScreen({
         body: JSON.stringify({ latitude: lat, longitude: lng }),
       });
 
-      const newCoords = [...coords];
-      newCoords[index] = { latitude: lat, longitude: lng };
-      setCoords(newCoords);
-
-      if (refreshArea) refreshArea();
+      setCoords((prev) =>
+        prev.map((c) =>
+          c.id === id ? { ...c, latitude: lat, longitude: lng } : c,
+        ),
+      );
+      refreshArea?.();
     } catch (err) {
       console.error("Failed to update point", err);
     }
   };
 
-  if (!coords.length) return null;
+  const deletePoint = async (id?: string) => {
+    if (!id || !confirm("Delete this point?")) return;
+
+    try {
+      const token = await AsyncStorage.getItem("accessToken");
+      await fetch(`${BACKEND_URL}farm-points/${id}/`, {
+        method: "DELETE",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      setCoords((prev) => prev.filter((c) => c.id !== id));
+      refreshArea?.();
+    } catch (err) {
+      console.error("Failed to delete point", err);
+    }
+  };
+
+  // --- Map click handler ---
+  let lastClick = 0;
+  const MapClickHandler = () => {
+    useMapEvents({
+      click: async (e) => {
+        const now = Date.now();
+        const DOUBLE_CLICK_DELAY = 250; // ms
+        if (now - lastClick < DOUBLE_CLICK_DELAY && drawing && farmId) {
+          const { lat, lng } = e.latlng;
+          const newPoint = await createPoint(lat, lng);
+          if (newPoint) {
+            setCoords([
+              ...coords,
+              { id: newPoint.id, latitude: lat, longitude: lng },
+            ]);
+            refreshArea?.();
+          }
+        }
+        lastClick = now;
+      },
+    });
+    return null;
+  };
 
   return (
-    <MapContainer
-      bounds={coords.map((c: any) => [c.latitude, c.longitude])}
-      style={{ height: "100%", width: "100%" }}
-    >
-      <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+    <>
+      <div style={{ marginBottom: 10 }}>
+        <button onClick={() => setMapType("standard")}>Standard</button>
+        <button onClick={() => setMapType("satellite")}>Satellite</button>
+        <button onClick={() => setMapType("hybrid")}>Hybrid</button>
+      </div>
 
-      {coords.map((pos: any, index: number) => (
-        <Marker
-          key={index}
-          position={[pos.latitude, pos.longitude]}
-          draggable={true}
-          eventHandlers={{
-            dragend: (e: any) => {
-              const { lat, lng } = e.target.getLatLng();
-              updatePoint(index, lat, lng);
-            },
-          }}
+      <MapContainer
+        bounds={coords.map((c) => [c.latitude, c.longitude])}
+        style={{ height: "100%", width: "100%" }}
+        ref={mapRef}
+        doubleClickZoom={false}
+      >
+        <TileLayer
+          url={
+            mapType === "standard"
+              ? "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+              : mapType === "satellite"
+                ? "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                : "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          }
         />
-      ))}
 
-      <Polygon positions={coords.map((c: any) => [c.latitude, c.longitude])} />
-    </MapContainer>
+        <MapClickHandler />
+
+        {coords.map((pos) => (
+          <Marker
+            key={pos.id || `${pos.latitude}-${pos.longitude}`}
+            position={[pos.latitude, pos.longitude]}
+            draggable={true}
+            eventHandlers={{
+              dragend: (e: any) => {
+                const { lat, lng } = e.target.getLatLng();
+                if (!pos.id) return;
+                updatePoint(pos.id, lat, lng);
+              },
+              click: () => deletePoint(pos.id), // click deletes
+            }}
+          />
+        ))}
+
+        {coords.length > 2 && (
+          <Polygon positions={coords.map((c) => [c.latitude, c.longitude])} />
+        )}
+      </MapContainer>
+    </>
   );
 }
