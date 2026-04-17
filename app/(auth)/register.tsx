@@ -14,11 +14,8 @@ import {
   TextInput,
   View,
 } from "react-native";
-const urls =
-  Platform.OS === "android"
-    ? "https://semivolatile-nancey-incongrously.ngrok-free.dev"
-    : "http://localhost:8000";
-const BACKEND_URL = urls + "/api/auth/";
+import { apiFetch } from "../../services/fetch";
+
 export default function SignUp() {
   const router = useRouter();
   const [email, setEmail] = useState("");
@@ -28,30 +25,33 @@ export default function SignUp() {
 
   const handleSignUp = async () => {
     try {
-      const res = await fetch(BACKEND_URL + "register/", {
+      await apiFetch("auth/register/", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, name, password }),
       });
 
-      if (!res.ok) {
-        setMessage("Error creating account");
-        return;
-      }
-
-      // auto-login
-      const login = await fetch(BACKEND_URL + "login/", {
+      const login = await apiFetch("auth/login/", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
+
       const data = await login.json();
       await AsyncStorage.setItem("accessToken", data.access);
       await AsyncStorage.setItem("refreshToken", data.refresh);
 
       router.replace("/createFarm");
     } catch (err) {
-      setMessage("Network error");
+      if (err instanceof Error) {
+        setMessage(
+          err.message.includes("Session expired")
+            ? "Session expired"
+            : "Network error",
+        );
+      } else {
+        setMessage("Network error");
+      }
     }
   };
 

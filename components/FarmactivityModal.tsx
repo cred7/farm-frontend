@@ -13,13 +13,7 @@ import {
   TextInput,
   View,
 } from "react-native";
-
-const urls =
-  Platform.OS === "android"
-    ? "https://semivolatile-nancey-incongrously.ngrok-free.dev"
-    : "http://localhost:8000";
-
-const BACKEND_URL = urls + "/api/";
+import { apiFetch, AuthExpiredError } from "../services/fetch";
 
 // ✅ LOCKED ENUM (no more garbage data)
 const ACTIVITY_TYPES = [
@@ -34,13 +28,14 @@ type Props = {
   farmId: string;
   visible: boolean;
   onClose: () => void;
-  // onAdded: (activityType: string, description: string, image?: any) => void;
+  onWebSocketStart: () => void;
 };
 
 export default function FarmActivityModal({
   farmId,
   visible,
   onClose,
+  onWebSocketStart,
   // onAdded,
 }: Props) {
   const [activityType, setActivityType] = useState("PLANTING");
@@ -124,30 +119,27 @@ export default function FarmActivityModal({
     const token = await AsyncStorage.getItem("accessToken");
 
     try {
-      const res = await fetch(`${BACKEND_URL}farms/${farmId}/add_activity/`, {
+      await apiFetch(`farms/${farmId}/add_activity/`, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
         body: createFormData(),
       });
 
-      if (!res.ok) {
-        const err = await res.text();
-        setMessage(err);
+      // onAdded(activityType, description, image);
+      setDescription("");
+      setImage(null);
+      setActivityType("PLANTING");
+      console.log("Activity added successfully");
+      onWebSocketStart();
+      console.log("WebSocket started");
+      onClose();
+    } catch (err) {
+      if (err instanceof AuthExpiredError) {
+        setMessage("Session expired. Please log in again.");
+      } else if (err instanceof Error) {
+        setMessage(err.message || "Network error");
       } else {
-        // onAdded(activityType, description, image);
-
-        // reset
-        setDescription("");
-        setImage(null);
-        setActivityType("PLANTING");
-
-        onClose();
+        setMessage("Network error");
       }
-    } catch (e) {
-      setMessage("Network error");
-      console.error(e);
     }
 
     setLoading(false);

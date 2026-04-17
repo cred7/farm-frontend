@@ -1,6 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useEffect, useState } from "react";
-import { Platform, StyleSheet, Text, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
+import { apiFetch, AuthExpiredError } from "../services/fetch";
 
 type Coord = { latitude: number; longitude: number };
 
@@ -16,12 +17,6 @@ export default function MapScreen({
   const [coords, setCoords] = useState<Coord[]>(initialCoords || []);
   const [farmId, setFarmId] = useState<string | null>(null);
 
-  const urls =
-    Platform.OS === "android"
-      ? "https://semivolatile-nancey-incongrously.ngrok-free.dev"
-      : "http://localhost:8000";
-  const BACKEND_URL = urls + "/api/";
-
   useEffect(() => {
     const loadFarm = async () => {
       const id = await AsyncStorage.getItem("selectedFarmId");
@@ -34,11 +29,9 @@ export default function MapScreen({
     if (!farmId) return;
 
     try {
-      const token = await AsyncStorage.getItem("accessToken");
-      await fetch(`${BACKEND_URL}farm-points/${index}/`, {
+      await apiFetch(`farm-points/${index}/`, {
         method: "PATCH",
         headers: {
-          Authorization: token ? `Bearer ${token}` : "",
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ latitude: lat, longitude: lng }),
@@ -50,7 +43,9 @@ export default function MapScreen({
 
       if (refreshArea) refreshArea();
     } catch (err) {
-      console.error("Failed to update point", err);
+      if (err instanceof AuthExpiredError) {
+        console.error("Auth expired while updating native map point");
+      }
     }
   };
 

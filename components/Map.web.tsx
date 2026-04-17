@@ -1,4 +1,3 @@
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { useRef, useState } from "react";
@@ -9,7 +8,7 @@ import {
   TileLayer,
   useMapEvents,
 } from "react-leaflet";
-import { Platform } from "react-native";
+import { apiFetch, AuthExpiredError } from "../services/fetch";
 
 delete (L.Icon.Default.prototype as any)._getIconUrl;
 
@@ -39,20 +38,12 @@ export default function MapScreen({
   );
   const mapRef = useRef<any>(null);
 
-  const urls =
-    Platform.OS === "android"
-      ? "https://semivolatile-nancey-incongrously.ngrok-free.dev"
-      : "http://localhost:8000";
-  const BACKEND_URL = urls + "/api/";
-
   // --- Backend calls ---
   const createPoint = async (lat: number, lng: number) => {
     try {
-      const token = await AsyncStorage.getItem("accessToken");
-      const res = await fetch(`${BACKEND_URL}farm-points/upload_image/`, {
+      const res = await apiFetch("farm-points/upload_image/", {
         method: "POST",
         headers: {
-          Authorization: token ? `Bearer ${token}` : "",
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
@@ -63,22 +54,21 @@ export default function MapScreen({
         }),
       });
 
-      if (!res.ok) throw new Error("Failed to create point");
       const data = await res.json();
       return data; // {id, lat, lng}
     } catch (err) {
-      console.error(err);
+      if (err instanceof AuthExpiredError) {
+        console.error("Auth expired while creating point");
+      }
       return null;
     }
   };
 
   const updatePoint = async (id: string, lat: number, lng: number) => {
     try {
-      const token = await AsyncStorage.getItem("accessToken");
-      await fetch(`${BACKEND_URL}farm-points/${id}/`, {
+      await apiFetch(`farm-points/${id}/`, {
         method: "PATCH",
         headers: {
-          Authorization: token ? `Bearer ${token}` : "",
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ latitude: lat, longitude: lng }),
@@ -91,7 +81,9 @@ export default function MapScreen({
       );
       refreshArea?.();
     } catch (err) {
-      console.error("Failed to update point", err);
+      if (err instanceof AuthExpiredError) {
+        console.error("Auth expired while updating point");
+      }
     }
   };
 
@@ -99,15 +91,15 @@ export default function MapScreen({
     if (!id || !confirm("Delete this point?")) return;
 
     try {
-      const token = await AsyncStorage.getItem("accessToken");
-      await fetch(`${BACKEND_URL}farm-points/${id}/`, {
+      await apiFetch(`farm-points/${id}/`, {
         method: "DELETE",
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
       setCoords((prev) => prev.filter((c) => c.id !== id));
       refreshArea?.();
     } catch (err) {
-      console.error("Failed to delete point", err);
+      if (err instanceof AuthExpiredError) {
+        console.error("Auth expired while deleting point");
+      }
     }
   };
 

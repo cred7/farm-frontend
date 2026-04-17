@@ -14,8 +14,8 @@ import {
   Text,
   View,
 } from "react-native";
-
 import MapScreen from "../components/Map";
+import { apiFetch, AuthExpiredError } from "../services/fetch";
 
 type UploadResponse = { lat: number; lng: number };
 type UploadResponseArea = {
@@ -30,11 +30,6 @@ type QueueItem = {
   farm_id: string;
   is_boundary: boolean;
 };
-
-const BACKEND_URL =
-  Platform.OS === "android"
-    ? "https://semivolatile-nancey-incongrously.ngrok-free.dev/api/"
-    : "http://localhost:8000/api/";
 
 export default function FarmCapture() {
   const [image, setImage] = useState<string | null>(null);
@@ -77,7 +72,6 @@ export default function FarmCapture() {
       const toDecimal = (coord: number, ref: string) => {
         let dec = coord;
         if (ref === "S" || ref === "W") dec *= -1;
-        console.log(`Converted ${coord} ${ref} to decimal:`, dec);
         return dec;
       };
 
@@ -98,13 +92,11 @@ export default function FarmCapture() {
             const lng = EXIF.getTag(this, "GPSLongitude");
             const latRef = EXIF.getTag(this, "GPSLatitudeRef");
             const lngRef = EXIF.getTag(this, "GPSLongitudeRef");
-            console.log("EXIF data:", { lat, lng, latRef, lngRef });
             if (!lat || !lng) return resolve(null);
 
             const toDecimal = (coord: number[], ref: string) => {
               let dec = coord[0] + coord[1] / 60 + coord[2] / 3600;
               if (ref === "S" || ref === "W") dec *= -1;
-              console.log(`Converted ${coord} ${ref} to decimal:`, dec);
               return dec;
             };
 
@@ -178,13 +170,10 @@ export default function FarmCapture() {
 
     while (attempts < maxRetries) {
       try {
-        const token = await AsyncStorage.getItem("accessToken");
-
-        const res = await fetch(BACKEND_URL + "farm-points/upload_image/", {
+        const res = await apiFetch("farm-points/upload_image/", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
           body: JSON.stringify({
             farm_id: farmId,
@@ -194,25 +183,20 @@ export default function FarmCapture() {
           }),
         });
 
-        if (!res.ok) {
-          const err = await res.text();
-          setMessage(
-            `❌ ${err} uploaded content ${farmId} ${gps.lat} ${gps.lng}`,
-          );
-          setLoading(false);
-          return;
-        }
-
         const data: UploadResponse = await res.json();
         setResponse(data);
         setMessage("✅ Uploaded successfully");
         setLoading(false);
         return;
-      } catch {
+      } catch (err) {
         attempts++;
         if (attempts >= maxRetries) {
           await saveOffline(gps);
-          setMessage("📴 Saved offline");
+          if (err instanceof AuthExpiredError) {
+            setMessage("Session expired. Please log in again.");
+          } else {
+            setMessage("📴 Saved offline");
+          }
           setLoading(false);
           return;
         }
@@ -227,18 +211,13 @@ export default function FarmCapture() {
 
     for (const item of queue) {
       try {
-        const token = await AsyncStorage.getItem("accessToken");
-
-        const res = await fetch(BACKEND_URL + "farm-points/upload_image/", {
+        await apiFetch("farm-points/upload_image/", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
           body: JSON.stringify(item),
         });
-
-        if (!res.ok) remaining.push(item);
       } catch {
         remaining.push(item);
       }
@@ -254,17 +233,18 @@ export default function FarmCapture() {
     setMessage("");
 
     try {
-      const token = await AsyncStorage.getItem("accessToken");
-
-      const res = await fetch(BACKEND_URL + `farms/${farmId}/area/`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-      });
-
-      if (res.ok) {
+      try {
+        const res = await apiFetch(`farms/${farmId}/area/`);
         const data: UploadResponseArea = await res.json();
         setResponseArea(data);
-      } else {
-        setMessage(await res.text());
+      } catch (err) {
+        if (err instanceof AuthExpiredError) {
+          setMessage("Session expired. Please log in again.");
+        } else if (err instanceof Error) {
+          setMessage(err.message);
+        } else {
+          setMessage("Network error fetching area");
+        }
       }
     } catch {
       setMessage("Network error fetching area");

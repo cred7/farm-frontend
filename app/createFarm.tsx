@@ -16,12 +16,7 @@ import {
   TextInput,
   View,
 } from "react-native";
-
-const urls =
-  Platform.OS === "android"
-    ? "https://semivolatile-nancey-incongrously.ngrok-free.dev"
-    : "http://localhost:8000";
-const BACKEND_URL = urls + "/api/";
+import { apiFetch, AuthExpiredError } from "../services/fetch";
 
 export default function ManageFarms() {
   const router = useRouter();
@@ -37,20 +32,16 @@ export default function ManageFarms() {
   }, []);
 
   const loadFarms = async () => {
-    const token = await AsyncStorage.getItem("accessToken");
     try {
-      const res = await fetch(BACKEND_URL + "farms/", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) {
-        setMessage("Failed to fetch farms");
-        return;
-      }
+      const res = await apiFetch("farms/");
       const data = await res.json();
       setFarms(data);
       if (data.length > 0) setSelectedFarm(data[0].id);
     } catch (err) {
-      console.error(err);
+      if (err instanceof AuthExpiredError) {
+        setMessage("Session expired. Please log in again.");
+        return;
+      }
       setMessage("Network error fetching farms");
     }
   };
@@ -58,7 +49,7 @@ export default function ManageFarms() {
   const handleUseFarm = async () => {
     if (!selectedFarm) return setMessage("Select a farm first");
     await AsyncStorage.setItem("selectedFarmId", String(selectedFarm));
-    router.push("/farm"); // capture page
+    router.push("/farmCapture"); // capture page
   };
 
   const handleViewSummary = async () => {
@@ -74,30 +65,27 @@ export default function ManageFarms() {
     }
 
     setLoading(true);
-    const token = await AsyncStorage.getItem("accessToken");
 
     try {
-      const res = await fetch(BACKEND_URL + "farms/", {
+      const res = await apiFetch("farms/", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({ name: newFarmName }),
       });
 
-      if (!res.ok) {
-        const err = await res.text();
-        setMessage(err);
-        setLoading(false);
-        return;
-      }
-
       const data = await res.json();
       await AsyncStorage.setItem("selectedFarmId", String(data.id));
       router.push("/farmCapture");
-    } catch {
-      setMessage("Network error creating farm");
+    } catch (err) {
+      if (err instanceof AuthExpiredError) {
+        setMessage("Session expired. Please log in again.");
+      } else if (err instanceof Error) {
+        setMessage(err.message || "Network error creating farm");
+      } else {
+        setMessage("Network error creating farm");
+      }
     } finally {
       setLoading(false);
     }
