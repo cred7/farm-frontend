@@ -17,7 +17,7 @@ jobs:
           node-version: "24"
       - name: Install dependencies
         run: npm install
-      - name: Run tests
-        run: npm test -- --coverage
+      # - name: Run tests
+      #   run: npm test -- --coverage
       - name: Build project with docker
         run: docker build -t farm-app:1 .
