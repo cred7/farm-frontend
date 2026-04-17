@@ -1,33 +1,24 @@
 // components/UserArea.tsx
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useEffect, useState } from "react";
-import { Platform, StyleSheet, Text, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
+import { apiFetch } from "../services/fetch";
 
-const urls =
-  Platform.OS === "android"
-    ? "https://semivolatile-nancey-incongrously.ngrok-free.dev"
-    : "http://localhost:8000";
-const BACKEND_URL = urls + "/api/";
-
-export default function UserArea() {
+export default function UserArea({
+  username,
+}: {
+  username: (value: boolean) => void;
+}) {
   const [user, setUser] = useState<{ name: string } | null>(null);
 
   useEffect(() => {
     const fetchUser = async () => {
       try {
-        const token = await AsyncStorage.getItem("accessToken");
-        if (!token) return;
-
-        const res = await fetch(BACKEND_URL + "auth/me/", {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-
-        if (!res.ok) return;
-
+        const res = await apiFetch("auth/me/");
         const data = await res.json();
         setUser(data);
+        username(true);
       } catch (err) {
-        console.error("Failed fetching user info", err);
+        // If token has expired or user is not authenticated, just leave user null.
       }
     };
 

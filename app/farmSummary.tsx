@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import React, { useEffect, useMemo, useState } from "react";
+import { router } from "expo-router";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -13,7 +14,15 @@ import {
   View,
 } from "react-native";
 import FarmActivityModal from "../components/FarmactivityModal";
-
+import FarmActivity from "../components/websocket";
+import { apiFetch, AuthExpiredError } from "../services/fetch";
+type MLResult = {
+  severity: "low" | "medium" | "high";
+  pest_type: string;
+  confidence: number;
+  pest_detected: boolean;
+  recommendation: string;
+};
 type Activity = {
   id: number;
   activity_type: "PLANTING" | "SPRAYING" | "HARVEST" | "FERTILIZING" | "OTHER";
@@ -22,6 +31,8 @@ type Activity = {
   created_at: string;
   updated_at: string;
   image?: string;
+  status?: "PENDING" | "DONE" | "FAILED";
+  ml_result?: MLResult;
 };
 
 type FarmSummary = {
@@ -33,22 +44,16 @@ type FarmSummary = {
   crop_type?: string;
   points_count?: number;
   expected_yield?: number;
-  activities: Activity[];
+  activities: Activity[] | null;
 };
-
-const urls =
-  Platform.OS === "android"
-    ? "https://semivolatile-nancey-incongrously.ngrok-free.dev"
-    : "http://localhost:8000";
-
-const BACKEND_URL = urls + "/api/";
 
 export default function FarmSummaryScreen() {
   const [farmId, setFarmId] = useState<string | null>(null);
   const [summary, setSummary] = useState<FarmSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
-
+  const startWsRef = useRef<() => void>(() => {});
+  const [isOpen, setIsOpen] = useState(false);
   // filters
   const [typeFilter, setTypeFilter] = useState<string>("ALL");
   const [startDate, setStartDate] = useState("");
@@ -61,18 +66,17 @@ export default function FarmSummaryScreen() {
   // 🔥 FETCH
   const fetchSummary = async (id: string) => {
     setLoading(true);
-    const token = await AsyncStorage.getItem("accessToken");
 
     try {
-      const res = await fetch(`${BACKEND_URL}farms/${id}/summary/`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
-
+      const res = await apiFetch(`farms/${id}/summary/`);
       const data = await res.json();
-      console.log("Fetched summary:", data);
       setSummary(data);
-    } catch (e) {
-      console.error(e);
+      console.log("Fetched summary:", data);
+    } catch (err) {
+      if (err instanceof AuthExpiredError) {
+        Alert.alert("Session expired", "Please log in again");
+        router.replace("/login");
+      }
     }
 
     setLoading(false);
@@ -83,47 +87,20 @@ export default function FarmSummaryScreen() {
       const id = await AsyncStorage.getItem("selectedFarmId");
       if (id) {
         setFarmId(id);
+
         fetchSummary(id);
       }
     };
     loadFarm();
   }, []);
 
-  // 🔥 ADD (with image)
-  // const addActivity = async (
-  //   type: string,
-  //   description: string,
-  //   image?: any,
-  // ) => {
-  //   const token = await AsyncStorage.getItem("accessToken");
-
-  //   try {
-  //     const res = await fetch(`${BACKEND_URL}farms/${farmId}/add_activity/`, {
-  //       method: "POST",
-  //       headers: {
-  //         Authorization: `Bearer ${token}`,
-  //       },
-  //       body: createFormData(type, description, image),
-  //     });
-
-  //     if (!res.ok) throw new Error();
-
-  //     fetchSummary(farmId!);
-  //   } catch {
-  //     Alert.alert("Error", "Failed to add activity");
-  //   }
-  // };
-
   // 🔥 EDIT
   const editActivity = async (id: number) => {
-    const token = await AsyncStorage.getItem("accessToken");
-
     try {
-      await fetch(`${BACKEND_URL}farms/${farmId}/update_activity/`, {
+      await apiFetch(`farms/${farmId}/update_activity/`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
           activity_id: id,
@@ -134,7 +111,12 @@ export default function FarmSummaryScreen() {
       setEditingId(null);
       setEditingText("");
       fetchSummary(farmId!);
-    } catch {
+    } catch (err) {
+      if (err instanceof AuthExpiredError) {
+        Alert.alert("Session expired", "Please log in again");
+        router.replace("/login");
+        return;
+      }
       Alert.alert("Error", "Update failed");
     }
   };
@@ -143,20 +125,21 @@ export default function FarmSummaryScreen() {
   const deleteActivity = (id: number) => {
     const proceedToDelete = async () => {
       try {
-        const token = await AsyncStorage.getItem("accessToken");
-
-        await fetch(`${BACKEND_URL}farms/${farmId}/delete_activity/`, {
+        await apiFetch(`farms/${farmId}/delete_activity/`, {
           method: "DELETE",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
           },
           body: JSON.stringify({ activity_id: id }),
         });
 
         fetchSummary(farmId!);
       } catch (e) {
-        console.log(e);
+        if (e instanceof AuthExpiredError) {
+          Alert.alert("Session expired", "Please log in again");
+          router.replace("/login");
+          return;
+        }
         Alert.alert("Error", "Delete failed");
       }
     };
@@ -186,33 +169,36 @@ export default function FarmSummaryScreen() {
 
   // 🔥 FILTER + SORT
   const filteredActivities = useMemo(() => {
-    if (!summary) return [];
+    if (!summary?.activities || summary?.activities.length === 0) return [];
 
-    return summary.activities
+    return (summary?.activities)
       .filter((a) => {
+        if (!a) return false;
         if (typeFilter !== "ALL" && a.activity_type !== typeFilter)
           return false;
 
-        const d = new Date(a.created_at).getTime();
+        const d = a.created_at ? new Date(a.created_at).getTime() : 0;
 
         if (startDate && d < new Date(startDate).getTime()) return false;
         if (endDate && d > new Date(endDate).getTime()) return false;
 
         return true;
       })
-      .sort(
-        (a, b) =>
-          new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-      );
+      .sort((a, b) => {
+        const db = b.created_at ? new Date(b.created_at).getTime() : 0;
+        const da = a.created_at ? new Date(a.created_at).getTime() : 0;
+        return db - da;
+      });
   }, [summary, typeFilter, startDate, endDate]);
 
   // 🔥 STATS
   const stats = useMemo(() => {
-    if (!summary || summary.activities.length === 0) return null;
+    if (!summary || !summary.activities || summary.activities.length === 0)
+      return null;
 
     return {
       total: summary.activities.length,
-      latest: summary.activities[0],
+      latest: summary.activities[0] ?? null,
     };
   }, [summary]);
 
@@ -225,12 +211,21 @@ export default function FarmSummaryScreen() {
       {summary && (
         <>
           {/* STATS */}
-          {stats && (
+          {stats && stats.latest ? (
             <View style={styles.stats}>
               <Text>Total Activities: {stats.total}</Text>
               <Text>
-                Latest: {new Date(stats.latest.created_at).toLocaleDateString()}
+                Latest:{" "}
+                {stats.latest.created_at
+                  ? new Date(stats.latest.created_at).toLocaleDateString()
+                  : "N/A"}{" "}
+                - {stats.latest.activity_type ?? "N/A"}
               </Text>
+            </View>
+          ) : (
+            <View style={styles.stats}>
+              <Text>Total Activities: {summary.activities?.length ?? 0}</Text>
+              <Text>Latest: N/A</Text>
             </View>
           )}
 
@@ -295,8 +290,23 @@ export default function FarmSummaryScreen() {
               )}
 
               <Text style={styles.date}>
-                {new Date(a.created_at).toLocaleString()}
+                {a.created_at
+                  ? new Date(a.created_at).toLocaleString()
+                  : "No date"}
               </Text>
+              <Text>{a.status}</Text>
+              {a.ml_result && (
+                <Text>
+                  ML Result:{" "}
+                  {a.ml_result.pest_detected
+                    ? `Pest: ${a.ml_result.pest_type} (Confidence: ${(
+                        a.ml_result.confidence * 100
+                      ).toFixed(
+                        2,
+                      )}%) severity: ${a.ml_result.severity.toUpperCase()} - Recommendation: ${a.ml_result.recommendation}`
+                    : "No pest detected"}
+                </Text>
+              )}
 
               <View style={styles.actions}>
                 <Button
@@ -315,40 +325,49 @@ export default function FarmSummaryScreen() {
             farmId={farmId!}
             visible={modalVisible}
             onClose={() => setModalVisible(false)}
-            // onAdded={(type, desc, image) => {
-            //   addActivity(type, desc, image);
-            //   setModalVisible(false);
-            // }}
+            onWebSocketStart={() => {
+              startWsRef.current();
+            }}
           />
         </>
+      )}
+
+      {farmId && (
+        <View style={styles.toastBackground}>
+          <FarmActivity
+            farmId={farmId!}
+            isOpen={() => setIsOpen(true)}
+            onRegisterStart={(fn) => {
+              startWsRef.current = fn;
+            }}
+          />
+        </View>
       )}
     </ScrollView>
   );
 }
 
-// 🔥 FORM DATA (mobile + web safe)
-// const createFormData = (type: string, description: string, image?: any) => {
-//   const data = new FormData();
-
-//   data.append("activity_type", type);
-//   data.append("description", description);
-
-//   if (image) {
-//     if (Platform.OS === "web") {
-//       data.append("image", image.file || image);
-//     } else {
-//       data.append("image", {
-//         uri: image.uri,
-//         name: "photo.jpg",
-//         type: "image/jpeg",
-//       } as any);
-//     }
-//   }
-
-//   return data;
-// };
-
 const styles = StyleSheet.create({
+  toastBackground: {
+    position: "absolute",
+    top: 50, // push it down from status bar
+    right: 16, // not glued to edge
+    zIndex: 1000, // make sure it floats above everything
+    elevation: 10, // Android shadow
+  },
+  toast: {
+    minWidth: 180,
+    maxWidth: 260,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    backgroundColor: "#2e3de2cb", // dark toast
+    shadowColor: "#000",
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    color: "white",
+  },
   container: { flex: 1, padding: 20 },
   title: { fontSize: 24, fontWeight: "700", marginBottom: 15 },
   subtitle: { fontSize: 20, fontWeight: "600", marginTop: 20 },

@@ -17,6 +17,7 @@ import {
   View,
 } from "react-native";
 import { v4 as uuidv4 } from "uuid";
+import { apiFetch, AuthExpiredError } from "../services/fetch";
 
 import MapScreen from "../components/Map";
 
@@ -26,7 +27,7 @@ type UploadResponseArea = {
   area_m2: string;
   hectares: string;
   acres: string;
-  coord: { id?: string; lat: number; lng: number }[];
+  coords: { id?: string; lat: number; lng: number }[];
 };
 
 type QueueItem = {
@@ -43,13 +44,6 @@ type QueueItem = {
   createdAt: number;
 };
 
-const urls =
-  Platform.OS === "android"
-    ? "https://semivolatile-nancey-incongrously.ngrok-free.dev"
-    : "http://localhost:8000";
-
-const BACKEND_URL = urls + "/api/";
-
 export default function FarmCapture() {
   const [image, setImage] = useState<string | null>(null);
   const [farmId, setFarmId] = useState("");
@@ -64,7 +58,7 @@ export default function FarmCapture() {
   const [isConnected, setIsConnected] = useState(true);
 
   const SCREEN_WIDTH = Dimensions.get("window").width;
-  const isWideScreen = SCREEN_WIDTH > 900;
+  const isWideScreen = SCREEN_WIDTH > 1000;
 
   useEffect(() => {
     loadQueue();
@@ -119,16 +113,11 @@ export default function FarmCapture() {
       formData.append("lng", file.lng.toString());
 
       const token = await AsyncStorage.getItem("accessToken");
-      const res = await fetch(BACKEND_URL + "farm-points/upload_image/", {
+      await apiFetch("farm-points/upload_image/", {
         method: "POST",
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
         body: formData,
       });
 
-      if (!res.ok) return false;
-
-      const data: UploadResponse = await res.json();
-      setResponse(data);
       return true;
     } catch {
       return false;
@@ -146,8 +135,6 @@ export default function FarmCapture() {
     setMessage("");
 
     try {
-      const token = await AsyncStorage.getItem("accessToken");
-
       const formData = new FormData();
       if (file.uri) {
         formData.append("image", {
@@ -161,23 +148,20 @@ export default function FarmCapture() {
       formData.append("lat", file.lat.toString());
       formData.append("lng", file.lng.toString());
 
-      const res = await fetch(BACKEND_URL + "farm-points/upload_image/", {
+      const res = await apiFetch("farm-points/upload_image/", {
         method: "POST",
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
         body: formData,
       });
-
-      if (!res.ok) {
-        await saveOffline(file);
-        setMessage("📴 Failed - saved to queue");
-      } else {
-        const data: UploadResponse = await res.json();
-        setResponse(data);
-        setMessage("✅ Uploaded successfully");
-      }
-    } catch {
+      const data: UploadResponse = await res.json();
+      setResponse(data);
+      setMessage("✅ Uploaded successfully");
+    } catch (err) {
       await saveOffline(file);
-      setMessage("📴 Failed - saved to queue");
+      if (err instanceof AuthExpiredError) {
+        setMessage("Session expired. Please log in again.");
+      } else {
+        setMessage("📴 Failed - saved to queue");
+      }
     } finally {
       setLoading(false);
     }
@@ -340,23 +324,27 @@ export default function FarmCapture() {
       if (!id) return;
       const token = await AsyncStorage.getItem("accessToken");
 
-      const res = await fetch(BACKEND_URL + `farms/${id}/area/`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-      });
-
-      if (res.ok) {
+      try {
+        const res = await apiFetch(`farms/${id}/area/`);
         const data: UploadResponseArea = await res.json();
+        console.log("Area data:", data);
         setResponseArea({
           ...data,
-          coord: data.coord.map((p: any) => ({
+          coords: data.coords.map((p: any) => ({
             id: p.id,
             lat: p.lat,
             lng: p.lng,
           })),
         });
-      } else {
-        const err = await res.text();
-        setMessage(err);
+      } catch (err) {
+        if (err instanceof AuthExpiredError) {
+          setMessage("Session expired. Please log in again.");
+        } else if (err instanceof Error) {
+          console.error("Error fetching area:", err);
+          setMessage(err.message);
+        } else {
+          setMessage("Network error fetching area");
+        }
       }
     } catch {
       setMessage("Network error fetching area");
@@ -453,7 +441,7 @@ export default function FarmCapture() {
             <View style={styles.mapCard}>
               <MapScreen
                 farmId={farmId}
-                initialCoords={responseArea.coord.map((p) => ({
+                initialCoords={responseArea.coords.map((p) => ({
                   id: p.id,
                   latitude: p.lat,
                   longitude: p.lng,

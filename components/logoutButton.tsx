@@ -1,13 +1,18 @@
 // components/LogoutButton.tsx
 import { useRouter } from "expo-router";
 import { StyleSheet, Text, TouchableOpacity } from "react-native";
-import { logoutUser } from "../services/auth";
+import { logoutUser } from "../services/fetch";
 
-export default function LogoutButton() {
+export default function LogoutButton({
+  loggedout,
+}: {
+  loggedout: (value: boolean) => void;
+}) {
   const router = useRouter();
 
   const handleLogout = async () => {
     await logoutUser();
+    loggedout(false);
     router.replace("/"); // back to index (login/signup)
   };
 

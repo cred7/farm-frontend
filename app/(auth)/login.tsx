@@ -14,12 +14,8 @@ import {
   TextInput,
   View,
 } from "react-native";
-const urls =
-  Platform.OS === "android"
-    ? "https://semivolatile-nancey-incongrously.ngrok-free.dev"
-    : "http://localhost:8000";
-const BACKEND_URL = urls + "/api/auth/";
-console.log("Using backend URL:", BACKEND_URL);
+import { apiFetch } from "../../services/fetch";
+
 export default function Login() {
   const router = useRouter();
   const [email, setEmail] = useState("");
@@ -28,24 +24,26 @@ export default function Login() {
 
   const handleLogin = async () => {
     try {
-      const res = await fetch(BACKEND_URL + "login/", {
+      const res = await apiFetch("auth/login/", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
 
-      if (!res.ok) {
-        setMessage("Invalid credentials");
-        return;
-      }
-
       const data = await res.json();
       await AsyncStorage.setItem("accessToken", data.access);
       await AsyncStorage.setItem("refreshToken", data.refresh);
-      console.log("donnnene", data);
       router.replace("/createFarm");
     } catch (err) {
-      setMessage("Network error");
+      if (err instanceof Error) {
+        setMessage(
+          err.message.includes("Session expired")
+            ? "Session expired"
+            : "Invalid credentials",
+        );
+      } else {
+        setMessage("Network error");
+      }
     }
   };
 

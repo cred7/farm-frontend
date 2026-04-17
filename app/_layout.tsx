@@ -15,7 +15,7 @@ export default function RootLayout() {
 
   useEffect(() => {
     checkAuth();
-  }, []);
+  }, [isLoggedIn]);
 
   const checkAuth = async () => {
     const token = await AsyncStorage.getItem("accessToken");
@@ -24,8 +24,8 @@ export default function RootLayout() {
 
   const HeaderRight = () => (
     <View style={{ flexDirection: "row", alignItems: "center" }}>
-      {isLoggedIn && <UserArea />}
-      {isLoggedIn && <LogoutButton />}
+      {isLoggedIn && <UserArea username={setIsLoggedIn} />}
+      {isLoggedIn && <LogoutButton loggedout={setIsLoggedIn} />}
     </View>
   );
 
